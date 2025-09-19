@@ -1,0 +1,81 @@
+name: Create IPA Packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-ios:
+    name: Build iOS and export .ipa
+    runs-on: macos-latest
+    env:
+      EXPORT_METHOD: ${{ secrets.EXPORT_METHOD }} # app-store / ad-hoc / development / enterprise
+      APP_IDENTIFIER: ${{ secrets.APP_IDENTIFIER }} # e.g. com.example.myapp
+      SCHEME: ${{ secrets.SCHEME }}                 # Xcode scheme to build
+      WORKSPACE: ${{ secrets.WORKSPACE }}           # e.g. MyApp.xcworkspace
+      PROJECT: ${{ secrets.PROJECT }}               # e.g. MyApp.xcodeproj (if WORKSPACE is empty)
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Ruby (for Fastlane)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.1'
+
+      - name: Install Fastlane
+        run: gem install fastlane
+
+      - name: Import signing certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_P12_BASE64 }}
+          p12-password: ${{ secrets.APPLE_P12_PASSWORD }}
+
+      - name: Install provisioning profile
+        run: |
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          echo "${{ secrets.PROVISIONING_PROFILE_BASE64 }}" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/$GITHUB_RUN_ID.mobileprovision
+
+      - name: Create ExportOptions.plist
+        run: |
+          cat > ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${EXPORT_METHOD}</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${APP_IDENTIFIER}</key>
+              <string>$(ls ~/Library/MobileDevice/Provisioning\ Profiles | head -n 1)</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Archive app
+        run: |
+          set -o pipefail
+          if [ -n "${WORKSPACE}" ]; then
+            xcodebuild -workspace "${WORKSPACE}" -scheme "${SCHEME}" -configuration Release -archivePath $PWD/build/${SCHEME}.xcarchive archive | xcpretty || true
+          else
+            xcodebuild -project "${PROJECT}" -scheme "${SCHEME}" -configuration Release -archivePath $PWD/build/${SCHEME}.xcarchive archive | xcpretty || true
+          fi
+
+      - name: Export IPA
+        run: |
+          xcodebuild -exportArchive -archivePath $PWD/build/${SCHEME}.xcarchive -exportOptionsPlist ExportOptions.plist -exportPath $PWD/build/${SCHEME}_export | xcpretty || true
+          ls -la build/${SCHEME}_export
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: build/${SCHEME}_export/*.ipa
